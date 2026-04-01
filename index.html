@@ -197,6 +197,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
       <div class="nav-item admin-only hidden" onclick="showPage('precios')">💲 Precios</div>
       <div class="nav-sec">Portal</div>
       <div class="nav-item" onclick="window.open('/cotiza','_blank')">🌐 Portal Clientes</div>
+      <div class="nav-sec">Contabilidad</div>
+      <div class="nav-item" onclick="showPage('cont-dashboard')">📊 Resumen Financiero</div>
+      <div class="nav-item" onclick="showPage('cont-ingresos')">💵 Ingresos</div>
+      <div class="nav-item" onclick="showPage('cont-gastos')">💸 Gastos Negocio</div>
+      <div class="nav-item" onclick="showPage('cont-nomina')">👔 Nómina</div>
+      <div class="nav-item" onclick="showPage('cont-personal')">👤 Gastos Personales</div>
     </div>
     <div class="sb-foot"><button class="btn-out" onclick="doLogout()">Cerrar sesión</button></div>
   </div>
@@ -604,7 +610,7 @@ function showPage(p){
   document.querySelectorAll(".nav-item").forEach(el=>el.classList.remove("active"));
   const pg=G("page-"+p);if(pg)pg.classList.add("active");
   document.querySelectorAll(".nav-item").forEach(el=>{if(el.getAttribute("onclick")?.includes("'"+p+"'"))el.classList.add("active")});
-  if(p==="historial")renderHist();if(p==="clientes")renderClientes();if(p==="caja"){renderCaja();renderCajaStats()};
+  if(p==="historial")renderHist();if(p==="cont-ingresos"){loadIngresos()}if(p==="cont-gastos"){loadGastos()}if(p==="cont-nomina"){loadNomina()}if(p==="cont-personal"){loadPersonal()}if(p==="cont-dashboard"){loadContDashboard()}if(p==="clientes")renderClientes();if(p==="caja"){renderCaja();renderCajaStats()};
   if(p==="dashboard")renderDash();if(p==="precios")renderPrecios();if(p==="ncf")renderNCF();if(p==="solicitudes")renderSolicitudes();
 }
 function showSvcTab(t){
@@ -983,7 +989,538 @@ function initApp(){
   const mm=String(now2.getMonth()+1).padStart(2,"0");
   G("caja-fmes").value=`${now2.getFullYear()}-${mm}`;
   initCotCounter().then(()=>updDocNum());
+  initContDates();
 }
+
+// ============================================
+// MÓDULO DE CONTABILIDAD
+// ============================================
+const TSS = {
+  empleado: { sfs: 0.0304, afp: 0.0287 },
+  empleador: { sfs: 0.0709, afp: 0.0710, srl: 0.0110, infotep: 0.0100 }
+};
+
+function calcTSS(salarioQuincena, aplicaTSS) {
+  if (!aplicaTSS) return { descSFS:0, descAFP:0, totalDesc:0, neto:salarioQuincena, aporteSFS:0, aporteAFP:0, aporteSRL:0, aporteINFOTEP:0, costoEmpleador:salarioQuincena };
+  const base = salarioQuincena;
+  const descSFS = Math.round(base * TSS.empleado.sfs);
+  const descAFP = Math.round(base * TSS.empleado.afp);
+  const totalDesc = descSFS + descAFP;
+  const neto = base - totalDesc;
+  const aporteSFS = Math.round(base * TSS.empleador.sfs);
+  const aporteAFP = Math.round(base * TSS.empleador.afp);
+  const aporteSRL = Math.round(base * TSS.empleador.srl);
+  const aporteINFOTEP = Math.round(base * TSS.empleador.infotep);
+  const costoEmpleador = base + aporteSFS + aporteAFP + aporteSRL + aporteINFOTEP;
+  return { descSFS, descAFP, totalDesc, neto, aporteSFS, aporteAFP, aporteSRL, aporteINFOTEP, costoEmpleador };
+}
+
+// Init contabilidad dates
+function initContDates() {
+  const now = new Date();
+  const mm = String(now.getMonth()+1).padStart(2,'0');
+  const mesVal = `${now.getFullYear()}-${mm}`;
+  ['cont-mes','ing-fmes','gas-fmes','nom-mes','per-fmes'].forEach(id => { const el = G(id); if(el) el.value = mesVal; });
+  ['ing-fecha','gas-fecha','per-fecha'].forEach(id => { const el = G(id); if(el) el.value = toISO(now); });
+}
+
+function toggleRNCFields() {
+  const chk = G('ing-rnc').checked;
+  G('ing-rnc-fields').classList.toggle('hidden', !chk);
+}
+
+// INGRESOS
+async function addIngreso() {
+  const fecha = G('ing-fecha').value, cliente = G('ing-cliente').value.trim(), monto = parseFloat(G('ing-monto').value)||0;
+  if(!fecha||!cliente||!monto){alert('Completa fecha, cliente y monto.');return}
+  const rec = {
+    fecha, cliente,
+    servicio: G('ing-servicio').value||'Servicio general',
+    monto,
+    metodo_pago: G('ing-metodo').value,
+    tecnico: G('ing-tecnico').value,
+    cotizacion_numero: G('ing-cotnum').value,
+    tiene_rnc: G('ing-rnc').checked,
+    ncf: G('ing-ncf')?.value||null,
+    itbis: parseFloat(G('ing-itbis')?.value)||0,
+    nota: G('ing-nota').value,
+    registrado_por: cu?.profile?.name||''
+  };
+  const {error} = await sb.from('ingresos').insert(rec);
+  if(error){toast('Error al registrar',false);return}
+  toast('Ingreso registrado');
+  ['ing-cliente','ing-monto','ing-nota','ing-cotnum','ing-ncf'].forEach(id=>{const el=G(id);if(el)el.value=''});
+  G('ing-rnc').checked=false;G('ing-rnc-fields').classList.add('hidden');
+  loadIngresos();
+}
+
+async function loadIngresos() {
+  const list = G('ing-list'), stats = G('ing-stats'); if(!list)return;
+  list.innerHTML='<div class="loading">Cargando...</div>';
+  const fm = G('ing-fmes')?.value||'', search = (G('ing-search')?.value||'').toLowerCase();
+  let q = sb.from('ingresos').select('*').order('fecha',{ascending:false}).limit(100);
+  if(fm){const [y,m]=fm.split('-');q=q.gte('fecha',`${y}-${m}-01`).lte('fecha',`${y}-${m}-31`)}
+  const {data:items}=await q;
+  let filtered=items||[];if(search)filtered=filtered.filter(r=>r.cliente.toLowerCase().includes(search));
+  const total=filtered.reduce((s,r)=>s+r.monto,0);
+  if(stats)stats.innerHTML=`<div style="background:#D1FAE5;border-radius:8px;padding:.5rem .9rem;font-size:.85rem"><strong style="color:#065F46">${fmt(total)}</strong> <span style="color:#064E3B">total ingresos</span></div><div style="background:#DBEAFE;border-radius:8px;padding:.5rem .9rem;font-size:.85rem"><strong style="color:#1E40AF">${filtered.length}</strong> <span style="color:#1E3A8A">registros</span></div>`;
+  if(!filtered.length){list.innerHTML='<div class="empty">Sin ingresos en este período</div>';return}
+  list.innerHTML=filtered.map(r=>`<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:.7rem .9rem;margin-bottom:.35rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.35rem">
+    <div>
+      <div style="font-size:.9rem;font-weight:600">${r.cliente}</div>
+      <div style="font-size:.75rem;color:var(--muted)">${r.fecha} · ${r.servicio}${r.tecnico?' · '+r.tecnico:''}${r.metodo_pago?' · '+r.metodo_pago:''}</div>
+      ${r.nota?`<div style="font-size:.72rem;color:var(--muted);font-style:italic">${r.nota}</div>`:''}
+    </div>
+    <div style="display:flex;align-items:center;gap:.5rem">
+      <span style="font-size:.95rem;font-weight:700;color:var(--green)">+${fmt(r.monto)}</span>
+      ${r.tiene_rnc?`<span class="badge b-blue">RNC</span>`:''}
+      <button onclick="delIngreso(${r.id})" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px">×</button>
+    </div>
+  </div>`).join('');
+}
+async function delIngreso(id){if(!confirm('¿Eliminar?'))return;await sb.from('ingresos').delete().eq('id',id);loadIngresos();toast('Eliminado')}
+
+// GASTOS NEGOCIO
+async function addGasto() {
+  const fecha=G('gas-fecha').value,cat=G('gas-cat').value,desc=G('gas-desc').value.trim(),monto=parseFloat(G('gas-monto').value)||0;
+  if(!fecha||!cat||!desc||!monto){alert('Completa los campos requeridos.');return}
+  const rec={fecha,categoria:cat,descripcion:desc,monto,proveedor:G('gas-prov').value,pagado_por:G('gas-pagado').value,nota:G('gas-nota').value,registrado_por:cu?.profile?.name||''};
+  const {error}=await sb.from('gastos_negocio').insert(rec);
+  if(error){toast('Error al registrar',false);return}
+  toast('Gasto registrado');
+  ['gas-desc','gas-monto','gas-prov','gas-nota'].forEach(id=>{const el=G(id);if(el)el.value=''});
+  loadGastos();
+}
+async function loadGastos() {
+  const list=G('gas-list'),stats=G('gas-stats');if(!list)return;
+  list.innerHTML='<div class="loading">Cargando...</div>';
+  const fm=G('gas-fmes')?.value||'',fcat=G('gas-fcat')?.value||'';
+  let q=sb.from('gastos_negocio').select('*').order('fecha',{ascending:false}).limit(100);
+  if(fm){const[y,m]=fm.split('-');q=q.gte('fecha',`${y}-${m}-01`).lte('fecha',`${y}-${m}-31`)}
+  if(fcat)q=q.eq('categoria',fcat);
+  const {data:items}=await q;
+  const total=(items||[]).reduce((s,r)=>s+r.monto,0);
+  if(stats)stats.innerHTML=`<div style="background:#FEE2E2;border-radius:8px;padding:.5rem .9rem;font-size:.85rem"><strong style="color:#991B1B">${fmt(total)}</strong> <span style="color:#7F1D1D">total gastos</span></div>`;
+  if(!items?.length){list.innerHTML='<div class="empty">Sin gastos en este período</div>';return}
+  // Group by category
+  const cats={};(items||[]).forEach(r=>{if(!cats[r.categoria])cats[r.categoria]=0;cats[r.categoria]+=r.monto});
+  let html=`<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.65rem">`;
+  Object.entries(cats).sort((a,b)=>b[1]-a[1]).forEach(([cat,tot])=>{html+=`<div style="background:#FEF3C7;border-radius:6px;padding:3px 9px;font-size:.75rem;color:#92400E"><strong>${cat}</strong>: ${fmt(tot)}</div>`});
+  html+='</div>';
+  html+=items.map(r=>`<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:.7rem .9rem;margin-bottom:.35rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.35rem">
+    <div>
+      <div style="font-size:.9rem;font-weight:600">${r.descripcion}${r.proveedor?' — '+r.proveedor:''}</div>
+      <div style="font-size:.75rem;color:var(--muted)">${r.fecha} · ${r.categoria}${r.pagado_por?' · Pago: '+r.pagado_por:''}</div>
+      ${r.nota?`<div style="font-size:.72rem;color:var(--muted);font-style:italic">${r.nota}</div>`:''}
+    </div>
+    <div style="display:flex;align-items:center;gap:.5rem">
+      <span style="font-size:.95rem;font-weight:700;color:var(--red)">-${fmt(r.monto)}</span>
+      <button onclick="delGasto(${r.id})" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px">×</button>
+    </div>
+  </div>`).join('');
+  list.innerHTML=html;
+}
+async function delGasto(id){if(!confirm('¿Eliminar?'))return;await sb.from('gastos_negocio').delete().eq('id',id);loadGastos();toast('Eliminado')}
+
+// NÓMINA
+async function generarNomina() {
+  const mes = G('nom-mes').value; if(!mes){alert('Selecciona el mes.');return}
+  const [anio,m] = mes.split('-').map(Number);
+  const {data:emps} = await sb.from('empleados').select('*').eq('activo',true);
+  if(!emps?.length){alert('No hay empleados activos.');return}
+  const records = [];
+  for(const emp of emps) {
+    const sq = emp.salario_mensual/2;
+    const tss = calcTSS(sq, emp.tss_aplica);
+    for(const q of ['primera','segunda']) {
+      const periodo = q==='primera'?`${anio}-${String(m).padStart(2,'0')}-15`:`${anio}-${String(m).padStart(2,'0')}-${new Date(anio,m,0).getDate()}`;
+      const {data:existe} = await sb.from('nomina').select('id').eq('empleado_id',emp.id).eq('mes',m).eq('anio',anio).eq('quincena',q).single();
+      if(!existe) records.push({
+        empleado_id:emp.id, empleado_nombre:emp.nombre, periodo, quincena:q, mes:m, anio,
+        salario_mensual:emp.salario_mensual, salario_quincena:sq,
+        descuento_sfs:tss.descSFS, descuento_afp:tss.descAFP, total_descuentos:tss.totalDesc,
+        neto_pagar:tss.neto,
+        aporte_sfs_empleador:tss.aporteSFS, aporte_afp_empleador:tss.aporteAFP,
+        aporte_srl:tss.aporteSRL, aporte_infotep:tss.aporteINFOTEP,
+        costo_total_empleador:tss.costoEmpleador,
+        registrado_por: cu?.profile?.name||''
+      });
+    }
+  }
+  if(!records.length){toast('Las quincenas de este mes ya existen');loadNomina();return}
+  const {error} = await sb.from('nomina').insert(records);
+  if(error){toast('Error al generar',false);console.error(error);return}
+  toast(`${records.length} registros de nómina generados`);loadNomina();
+}
+
+async function loadNomina() {
+  const mes=G('nom-mes').value;if(!mes)return;
+  const [anio,m]=mes.split('-').map(Number);
+  const {data:records}=await sb.from('nomina').select('*').eq('mes',m).eq('anio',anio).order('quincena').order('empleado_nombre');
+  const q1=G('nom-q1'),q2=G('nom-q2');
+  const renderQ=(container,quincena)=>{
+    const items=(records||[]).filter(r=>r.quincena===quincena);
+    if(!items.length){container.innerHTML='<div class="empty">Sin registros — click "Generar"</div>';return}
+    const totalNeto=items.reduce((s,r)=>s+r.neto_pagar,0);
+    const totalCosto=items.reduce((s,r)=>s+r.costo_total_empleador,0);
+    container.innerHTML=`
+      ${items.map(r=>`<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;margin-bottom:.35rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.35rem">
+          <div>
+            <div style="font-size:.9rem;font-weight:600">${r.empleado_nombre}</div>
+            <div style="font-size:.72rem;color:var(--muted)">Salario quincena: ${fmt(r.salario_quincena)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:.95rem;font-weight:700;color:var(--navy)">${fmt(r.neto_pagar)}</div>
+            <div style="font-size:.7rem;color:var(--muted)">neto a pagar</div>
+          </div>
+        </div>
+        ${r.total_descuentos>0?`<div style="background:#FFF7ED;border-radius:6px;padding:.4rem .65rem;font-size:.73rem;color:#92400E;margin-bottom:.35rem">
+          Descuentos TSS: SFS ${fmt(r.descuento_sfs)} + AFP ${fmt(r.descuento_afp)} = <strong>${fmt(r.total_descuentos)}</strong>
+        </div>`:''}
+        ${r.costo_total_empleador>r.salario_quincena?`<div style="background:#EFF6FF;border-radius:6px;padding:.4rem .65rem;font-size:.73rem;color:#1E40AF;margin-bottom:.35rem">
+          Costo total empresa: ${fmt(r.costo_total_empleador)} (incluye aportes TSS empleador)
+        </div>`:''}
+        <div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">
+          <span class="badge ${r.pagado?'b-green':'b-yellow'}">${r.pagado?'Pagado':'Pendiente'}</span>
+          ${r.pagado?`<span style="font-size:.72rem;color:var(--muted)">${r.fecha_pago} · ${r.metodo_pago||''}</span>`:`
+          <select id="met-${r.id}" class="fsel" style="font-size:.75rem;padding:2px 5px">
+            <option>Transferencia Banreservas</option>
+            <option>Transferencia Popular</option>
+            <option>Efectivo</option>
+          </select>
+          <button class="btn btn-green" style="font-size:.75rem;padding:3px 9px" onclick="marcarPagado(${r.id})">Marcar pagado</button>`}
+        </div>
+      </div>`).join('')}
+      <div style="background:#1F3864;color:white;border-radius:8px;padding:.65rem .9rem;display:flex;justify-content:space-between;font-size:.88rem;margin-top:.35rem">
+        <span>Total neto a pagar</span><strong>${fmt(totalNeto)}</strong>
+      </div>
+      <div style="background:#F1F5F9;border-radius:8px;padding:.5rem .9rem;display:flex;justify-content:space-between;font-size:.78rem;color:var(--muted);margin-top:.25rem">
+        <span>Costo total empresa (con TSS)</span><strong style="color:var(--text)">${fmt(totalCosto)}</strong>
+      </div>`;
+  };
+  if(q1)renderQ(q1,'primera');
+  if(q2)renderQ(q2,'segunda');
+  // Empleados table
+  const {data:emps}=await sb.from('empleados').select('*').eq('activo',true);
+  const empEl=G('nom-empleados');
+  if(empEl&&emps)empEl.innerHTML=`<table style="width:100%;font-size:.85rem;border-collapse:collapse">
+    <thead><tr style="background:#F1F5F9"><th style="padding:.5rem .75rem;text-align:left;font-size:.72rem;color:var(--muted);text-transform:uppercase">Empleado</th><th style="padding:.5rem .75rem;text-align:left;font-size:.72rem;color:var(--muted);text-transform:uppercase">Posición</th><th style="padding:.5rem .75rem;text-align:right;font-size:.72rem;color:var(--muted);text-transform:uppercase">Salario mensual</th><th style="padding:.5rem .75rem;text-align:right;font-size:.72rem;color:var(--muted);text-transform:uppercase">Por quincena</th><th style="padding:.5rem .75rem;text-align:center;font-size:.72rem;color:var(--muted);text-transform:uppercase">TSS</th></tr></thead>
+    <tbody>${emps.map(e=>`<tr style="border-bottom:1px solid var(--border)"><td style="padding:.5rem .75rem;font-weight:500">${e.nombre}</td><td style="padding:.5rem .75rem;color:var(--muted)">${e.posicion}</td><td style="padding:.5rem .75rem;text-align:right">${fmt(e.salario_mensual)}</td><td style="padding:.5rem .75rem;text-align:right">${fmt(e.salario_mensual/2)}</td><td style="padding:.5rem .75rem;text-align:center"><span class="badge ${e.tss_aplica?'b-blue':'b-gray'}">${e.tss_aplica?'Sí':'No'}</span></td></tr>`).join('')}</tbody>
+  </table>`;
+}
+async function marcarPagado(id) {
+  const metodo=G('met-'+id)?.value||'Transferencia';
+  const {error}=await sb.from('nomina').update({pagado:true,fecha_pago:toISO(new Date()),metodo_pago:metodo}).eq('id',id);
+  if(error){toast('Error',false);return}
+  toast('Marcado como pagado');loadNomina();
+}
+
+// GASTOS PERSONALES
+async function addPersonal() {
+  const fecha=G('per-fecha').value,cat=G('per-cat').value,desc=G('per-desc').value.trim(),monto=parseFloat(G('per-monto').value)||0;
+  if(!fecha||!cat||!desc||!monto){alert('Completa los campos requeridos.');return}
+  const rec={fecha,persona:G('per-persona').value,categoria:cat,descripcion:desc,monto,metodo_pago:G('per-metodo').value};
+  const {error}=await sb.from('gastos_personales').insert(rec);
+  if(error){toast('Error',false);return}
+  toast('Gasto personal registrado');
+  ['per-desc','per-monto'].forEach(id=>{const el=G(id);if(el)el.value=''});
+  loadPersonal();
+}
+async function loadPersonal() {
+  const list=G('per-list'),stats=G('per-stats');if(!list)return;
+  list.innerHTML='<div class="loading">Cargando...</div>';
+  const fm=G('per-fmes')?.value||'',fcat=G('per-fcat')?.value||'';
+  let q=sb.from('gastos_personales').select('*').order('fecha',{ascending:false}).limit(100);
+  if(fm){const[y,m]=fm.split('-');q=q.gte('fecha',`${y}-${m}-01`).lte('fecha',`${y}-${m}-31`)}
+  if(fcat)q=q.eq('categoria',fcat);
+  const {data:items}=await q;
+  const total=(items||[]).reduce((s,r)=>s+r.monto,0);
+  if(stats)stats.innerHTML=`<div style="background:#F3E8FF;border-radius:8px;padding:.5rem .9rem;font-size:.85rem"><strong style="color:#6B21A8">${fmt(total)}</strong> <span style="color:#581C87">gastos personales</span></div>`;
+  if(!items?.length){list.innerHTML='<div class="empty">Sin gastos personales en este período</div>';return}
+  list.innerHTML=items.map(r=>`<div style="background:white;border:1px solid var(--border);border-radius:8px;padding:.7rem .9rem;margin-bottom:.35rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.35rem">
+    <div>
+      <div style="font-size:.9rem;font-weight:600">${r.descripcion}</div>
+      <div style="font-size:.75rem;color:var(--muted)">${r.fecha} · ${r.categoria} · ${r.persona}${r.metodo_pago?' · '+r.metodo_pago:''}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:.5rem">
+      <span style="font-size:.95rem;font-weight:700;color:#7C3AED">-${fmt(r.monto)}</span>
+      <button onclick="delPersonal(${r.id})" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:13px">×</button>
+    </div>
+  </div>`).join('');
+}
+async function delPersonal(id){if(!confirm('¿Eliminar?'))return;await sb.from('gastos_personales').delete().eq('id',id);loadPersonal();toast('Eliminado')}
+
+// DASHBOARD CONTABLE
+async function loadContDashboard() {
+  const mes=G('cont-mes').value;if(!mes)return;
+  const [anio,m]=mes.split('-').map(Number);
+  const dateFrom=`${anio}-${String(m).padStart(2,'0')}-01`;
+  const dateTo=`${anio}-${String(m).padStart(2,'0')}-${new Date(anio,m,0).getDate()}`;
+  G('cont-period-label').textContent=`${new Date(anio,m-1,1).toLocaleDateString('es-DO',{month:'long',year:'numeric'})}`;
+  // Load all data in parallel
+  const [{data:ings},{data:gasNeg},{data:nom},{data:gasPer}] = await Promise.all([
+    sb.from('ingresos').select('*').gte('fecha',dateFrom).lte('fecha',dateTo),
+    sb.from('gastos_negocio').select('*').gte('fecha',dateFrom).lte('fecha',dateTo),
+    sb.from('nomina').select('*').eq('mes',m).eq('anio',anio),
+    sb.from('gastos_personales').select('*').gte('fecha',dateFrom).lte('fecha',dateTo)
+  ]);
+  const totalIng=(ings||[]).reduce((s,r)=>s+r.monto,0);
+  const totalGasNeg=(gasNeg||[]).reduce((s,r)=>s+r.monto,0);
+  const totalNomina=(nom||[]).reduce((s,r)=>s+r.neto_pagar,0);
+  const costoNomina=(nom||[]).reduce((s,r)=>s+r.costo_total_empleador,0);
+  const totalGasPer=(gasPer||[]).reduce((s,r)=>s+r.monto,0);
+  const gananciaReal=totalIng-totalGasNeg-costoNomina;
+  const statsEl=G('cont-stats');
+  if(statsEl)statsEl.innerHTML=`
+    <div class="stat" style="border-left:3px solid var(--green)"><div class="stat-icon">💵</div><div class="stat-label">Total ingresos</div><div class="stat-val" style="color:var(--green)">${fmt(totalIng)}</div><div style="font-size:.72rem;color:var(--muted)">${(ings||[]).length} cobros</div></div>
+    <div class="stat" style="border-left:3px solid var(--red)"><div class="stat-icon">💸</div><div class="stat-label">Gastos negocio</div><div class="stat-val" style="color:var(--red)">${fmt(totalGasNeg)}</div></div>
+    <div class="stat" style="border-left:3px solid var(--navy)"><div class="stat-icon">👔</div><div class="stat-label">Nómina (costo total)</div><div class="stat-val" style="color:var(--navy)">${fmt(costoNomina)}</div><div style="font-size:.72rem;color:var(--muted)">Neto empleados: ${fmt(totalNomina)}</div></div>
+    <div class="stat" style="border-left:3px solid ${gananciaReal>=0?'var(--green)':'var(--red)'}"><div class="stat-icon">📊</div><div class="stat-label">Ganancia neta real</div><div class="stat-val" style="color:${gananciaReal>=0?'var(--green)':'var(--red)'}">${fmt(gananciaReal)}</div><div style="font-size:.72rem;color:var(--muted)">Ingresos - Gastos - Nómina</div></div>
+    <div class="stat" style="border-left:3px solid #7C3AED"><div class="stat-icon">👤</div><div class="stat-label">Gastos personales</div><div class="stat-val" style="color:#7C3AED">${fmt(totalGasPer)}</div><div style="font-size:.72rem;color:var(--muted)">No afectan ganancia</div></div>`;
+  // Gastos breakdown
+  const catBreak={};(gasNeg||[]).forEach(r=>{if(!catBreak[r.categoria])catBreak[r.categoria]=0;catBreak[r.categoria]+=r.monto});
+  const gbEl=G('cont-gastos-breakdown');
+  if(gbEl)gbEl.innerHTML=Object.entries(catBreak).sort((a,b)=>b[1]-a[1]).map(([cat,tot])=>`<div style="display:flex;justify-content:space-between;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem"><span>${cat}</span><span style="font-weight:600;color:var(--red)">${fmt(tot)}</span></div>`).join('')||'<div class="empty">Sin gastos</div>';
+  // Ingresos breakdown
+  const svcBreak={};(ings||[]).forEach(r=>{if(!svcBreak[r.servicio])svcBreak[r.servicio]=0;svcBreak[r.servicio]+=r.monto});
+  const ibEl=G('cont-ingresos-breakdown');
+  if(ibEl)ibEl.innerHTML=Object.entries(svcBreak).sort((a,b)=>b[1]-a[1]).map(([svc,tot])=>`<div style="display:flex;justify-content:space-between;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem"><span>${svc}</span><span style="font-weight:600;color:var(--green)">${fmt(tot)}</span></div>`).join('')||'<div class="empty">Sin ingresos</div>';
+  // Nomina resumen
+  const nomEl=G('cont-nomina-resumen');
+  if(nomEl){
+    const pagados=(nom||[]).filter(r=>r.pagado).length,pendientes=(nom||[]).filter(r=>!r.pagado).length;
+    nomEl.innerHTML=`<div style="display:flex;gap:.65rem;flex-wrap:wrap;margin-bottom:.5rem">
+      <div style="background:#D1FAE5;border-radius:8px;padding:.45rem .85rem;font-size:.83rem"><strong style="color:#065F46">${pagados}</strong> <span style="color:#064E3B">pagados</span></div>
+      <div style="background:#FEF3C7;border-radius:8px;padding:.45rem .85rem;font-size:.83rem"><strong style="color:#92400E">${pendientes}</strong> <span style="color:#78350F">pendientes</span></div>
+      <div style="background:#DBEAFE;border-radius:8px;padding:.45rem .85rem;font-size:.83rem"><strong style="color:#1E40AF">${fmt(costoNomina)}</strong> <span style="color:#1E3A8A">costo total empleador</span></div>
+    </div>`;
+  }
+}
+
 </script>
+
+    <!-- CONTABILIDAD DASHBOARD -->
+    <div class="page" id="page-cont-dashboard">
+      <div class="ph"><h1>Resumen Financiero</h1><p id="cont-period-label">Mes actual</p></div>
+      <div style="display:flex;gap:.55rem;align-items:center;margin-bottom:1rem;flex-wrap:wrap">
+        <input type="month" id="cont-mes" class="fi" style="font-size:.88rem;padding:5px 9px" onchange="loadContDashboard()">
+        <button class="btn btn-navy" style="font-size:.82rem" onclick="loadContDashboard()">Actualizar</button>
+      </div>
+      <div class="stats-row" id="cont-stats" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem;margin-top:.85rem">
+        <div class="card">
+          <div class="card-title">Gastos por categoría</div>
+          <div id="cont-gastos-breakdown"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Ingresos por servicio</div>
+          <div id="cont-ingresos-breakdown"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:.85rem">
+        <div class="card-title">Resumen nómina del mes</div>
+        <div id="cont-nomina-resumen"></div>
+      </div>
+    </div>
+
+    <!-- INGRESOS -->
+    <div class="page" id="page-cont-ingresos">
+      <div class="ph"><h1>Ingresos</h1><p>Registro de cobros del negocio</p></div>
+      <div style="display:grid;grid-template-columns:1fr 360px;gap:1rem;align-items:start">
+        <div class="card">
+          <div style="display:flex;gap:.5rem;margin-bottom:.65rem;flex-wrap:wrap">
+            <input type="month" id="ing-fmes" class="fi" style="font-size:.85rem;padding:4px 8px" onchange="loadIngresos()">
+            <input class="fi" id="ing-search" type="text" placeholder="Buscar cliente..." oninput="loadIngresos()" style="flex:1;min-width:120px">
+          </div>
+          <div id="ing-stats" style="display:flex;gap:.65rem;margin-bottom:.65rem;flex-wrap:wrap"></div>
+          <div id="ing-list"><div class="loading">Cargando...</div></div>
+        </div>
+        <div class="card" style="position:sticky;top:1rem">
+          <div class="card-title">Registrar ingreso</div>
+          <div style="display:flex;flex-direction:column;gap:.45rem">
+            <div class="ff"><label class="fl">Fecha *</label><input class="fi" id="ing-fecha" type="date"></div>
+            <div class="ff"><label class="fl">Cliente *</label><input class="fi" id="ing-cliente" type="text" placeholder="Nombre del cliente"></div>
+            <div class="ff"><label class="fl">Servicio</label>
+              <select class="fsel" id="ing-servicio" style="width:100%">
+                <option value="">— Seleccionar —</option>
+                <option>Inyección/Extracción tapizado</option>
+                <option>Lavado de cortinas</option>
+                <option>Laminado de ventanas</option>
+                <option>Mantenimiento A/C</option>
+                <option>Limpieza de alfombras</option>
+                <option>Servicio combinado</option>
+                <option>Otro</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Monto (RD$) *</label><input class="fi" id="ing-monto" type="number" placeholder="0.00"></div>
+            <div class="ff"><label class="fl">Método de pago</label>
+              <select class="fsel" id="ing-metodo" style="width:100%">
+                <option value="">— Seleccionar —</option>
+                <option>Efectivo</option>
+                <option>Transferencia Banreservas</option>
+                <option>Transferencia Popular</option>
+                <option>Transferencia otra</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Técnico</label><input class="fi" id="ing-tecnico" type="text" placeholder="Nombre del técnico"></div>
+            <div class="ff"><label class="fl">No. Cotización</label><input class="fi" id="ing-cotnum" type="text" placeholder="COT-00001 (opcional)"></div>
+            <div style="display:flex;align-items:center;gap:.5rem;padding:.5rem 0">
+              <label class="tog"><input type="checkbox" id="ing-rnc" onchange="toggleRNCFields()"><span class="tog-s"></span></label>
+              <span style="font-size:.85rem;color:var(--muted)">Factura con RNC (B01)</span>
+            </div>
+            <div id="ing-rnc-fields" class="hidden">
+              <div class="ff" style="margin-bottom:.45rem"><label class="fl">NCF</label><input class="fi" id="ing-ncf" type="text" placeholder="B0100000001"></div>
+              <div class="ff"><label class="fl">ITBIS (RD$)</label><input class="fi" id="ing-itbis" type="number" placeholder="0.00"></div>
+            </div>
+            <div class="ff"><label class="fl">Nota</label><input class="fi" id="ing-nota" type="text" placeholder="Observación (opcional)"></div>
+          </div>
+          <button class="btn btn-navy" style="width:100%;margin-top:.65rem" onclick="addIngreso()">Registrar ingreso</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GASTOS NEGOCIO -->
+    <div class="page" id="page-cont-gastos">
+      <div class="ph"><h1>Gastos del Negocio</h1><p>Solo gastos operativos de la empresa</p></div>
+      <div style="display:grid;grid-template-columns:1fr 360px;gap:1rem;align-items:start">
+        <div class="card">
+          <div style="display:flex;gap:.5rem;margin-bottom:.65rem;flex-wrap:wrap">
+            <input type="month" id="gas-fmes" class="fi" style="font-size:.85rem;padding:4px 8px" onchange="loadGastos()">
+            <select class="fsel" id="gas-fcat" onchange="loadGastos()">
+              <option value="">Todas las categorías</option>
+              <option>Gasolina/Transporte</option>
+              <option>Insumos/Materiales</option>
+              <option>Publicidad</option>
+              <option>Herramientas/Equipos</option>
+              <option>Lavandería</option>
+              <option>Servicios externos</option>
+              <option>Servicios (luz, agua, internet)</option>
+              <option>Marbete/Documentos</option>
+              <option>Uniformes</option>
+              <option>Otros gastos operativos</option>
+            </select>
+          </div>
+          <div id="gas-stats" style="display:flex;gap:.65rem;margin-bottom:.65rem;flex-wrap:wrap"></div>
+          <div id="gas-list"><div class="loading">Cargando...</div></div>
+        </div>
+        <div class="card" style="position:sticky;top:1rem">
+          <div class="card-title">Registrar gasto</div>
+          <div style="display:flex;flex-direction:column;gap:.45rem">
+            <div class="ff"><label class="fl">Fecha *</label><input class="fi" id="gas-fecha" type="date"></div>
+            <div class="ff"><label class="fl">Categoría *</label>
+              <select class="fsel" id="gas-cat" style="width:100%">
+                <option value="">— Seleccionar —</option>
+                <option>Gasolina/Transporte</option>
+                <option>Insumos/Materiales</option>
+                <option>Publicidad</option>
+                <option>Herramientas/Equipos</option>
+                <option>Lavandería</option>
+                <option>Servicios externos</option>
+                <option>Servicios (luz, agua, internet)</option>
+                <option>Marbete/Documentos</option>
+                <option>Uniformes</option>
+                <option>Otros gastos operativos</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Descripción *</label><input class="fi" id="gas-desc" type="text" placeholder="ej. Gasolina camioneta"></div>
+            <div class="ff"><label class="fl">Proveedor</label><input class="fi" id="gas-prov" type="text" placeholder="ej. Iberia, Jumbo..."></div>
+            <div class="ff"><label class="fl">Monto (RD$) *</label><input class="fi" id="gas-monto" type="number" placeholder="0.00"></div>
+            <div class="ff"><label class="fl">Pagado por</label>
+              <select class="fsel" id="gas-pagado" style="width:100%">
+                <option>Allyson (empresa)</option>
+                <option>Denichel</option>
+                <option>Efectivo empresa</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Nota</label><input class="fi" id="gas-nota" type="text" placeholder="Observación (opcional)"></div>
+          </div>
+          <button class="btn btn-navy" style="width:100%;margin-top:.65rem" onclick="addGasto()">Registrar gasto</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- NÓMINA -->
+    <div class="page" id="page-cont-nomina">
+      <div class="ph"><h1>Nómina</h1><p>Control de pagos de empleados con TSS</p></div>
+      <div style="display:flex;gap:.55rem;align-items:center;margin-bottom:1rem;flex-wrap:wrap">
+        <input type="month" id="nom-mes" class="fi" style="font-size:.88rem;padding:5px 9px" onchange="loadNomina()">
+        <button class="btn btn-navy" style="font-size:.82rem" onclick="generarNomina()">Generar quincenas del mes</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.85rem">
+        <div class="card">
+          <div class="card-title">Primera quincena (día 15)</div>
+          <div id="nom-q1"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Segunda quincena (fin de mes)</div>
+          <div id="nom-q2"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:.85rem">
+        <div class="card-title">Empleados activos</div>
+        <div id="nom-empleados"></div>
+      </div>
+    </div>
+
+    <!-- GASTOS PERSONALES -->
+    <div class="page" id="page-cont-personal">
+      <div class="ph"><h1>Gastos Personales</h1><p>Separados del negocio — no afectan la ganancia</p></div>
+      <div style="display:grid;grid-template-columns:1fr 360px;gap:1rem;align-items:start">
+        <div class="card">
+          <div style="display:flex;gap:.5rem;margin-bottom:.65rem;flex-wrap:wrap">
+            <input type="month" id="per-fmes" class="fi" style="font-size:.85rem;padding:4px 8px" onchange="loadPersonal()">
+            <select class="fsel" id="per-fcat" onchange="loadPersonal()">
+              <option value="">Todas las categorías</option>
+              <option>Comida/Restaurante</option>
+              <option>Transporte personal</option>
+              <option>Ropa/Personal</option>
+              <option>Entretenimiento</option>
+              <option>Salud/Medicina</option>
+              <option>Familia</option>
+              <option>Otros personal</option>
+            </select>
+          </div>
+          <div id="per-stats" style="display:flex;gap:.65rem;margin-bottom:.65rem;flex-wrap:wrap"></div>
+          <div id="per-list"><div class="loading">Cargando...</div></div>
+        </div>
+        <div class="card" style="position:sticky;top:1rem">
+          <div class="card-title">Registrar gasto personal</div>
+          <div style="display:flex;flex-direction:column;gap:.45rem">
+            <div class="ff"><label class="fl">Fecha *</label><input class="fi" id="per-fecha" type="date"></div>
+            <div class="ff"><label class="fl">Persona</label>
+              <select class="fsel" id="per-persona" style="width:100%">
+                <option>Denichel</option>
+                <option>Allyson</option>
+                <option>Familia</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Categoría *</label>
+              <select class="fsel" id="per-cat" style="width:100%">
+                <option value="">— Seleccionar —</option>
+                <option>Comida/Restaurante</option>
+                <option>Transporte personal</option>
+                <option>Ropa/Personal</option>
+                <option>Entretenimiento</option>
+                <option>Salud/Medicina</option>
+                <option>Familia</option>
+                <option>Otros personal</option>
+              </select>
+            </div>
+            <div class="ff"><label class="fl">Descripción *</label><input class="fi" id="per-desc" type="text" placeholder="ej. Cena restaurante, bravo..."></div>
+            <div class="ff"><label class="fl">Monto (RD$) *</label><input class="fi" id="per-monto" type="number" placeholder="0.00"></div>
+            <div class="ff"><label class="fl">Método de pago</label>
+              <select class="fsel" id="per-metodo" style="width:100%">
+                <option>Efectivo</option>
+                <option>Tarjeta/Popular</option>
+                <option>Transferencia</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-navy" style="width:100%;margin-top:.65rem" onclick="addPersonal()">Registrar</button>
+        </div>
+      </div>
+    </div>
+
 </body>
 </html>
